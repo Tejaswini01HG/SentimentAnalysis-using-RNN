@@ -1,48 +1,63 @@
-from pymongo import MongoClient
-import os
-import re
 from flask import Flask, render_template, request
+from pymongo import MongoClient
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+import os
+import re
 import pickle
 from datetime import datetime
 
 app = Flask(__name__)
 
 # ---------------------------
-# MongoDB Connection
+# MongoDB Setup (safe)
 # ---------------------------
 MONGO_URI = os.getenv("MONGO_URI")
 
-if not MONGO_URI:
-    raise ValueError("MONGO_URI not set in environment variables")
+collection = None
 
-client = MongoClient(MONGO_URI)
-
-db = client["sentiment_db"]
-collection = db["reviews"]
-
-# ---------------------------
-# Load Trained Model
-# ---------------------------
-model = load_model("model/sentiment_model.keras")
+if MONGO_URI:
+    try:
+        client = MongoClient(MONGO_URI)
+        db = client["sentiment_db"]
+        collection = db["reviews"]
+        print("MongoDB connected successfully")
+    except Exception as e:
+        print("MongoDB connection failed:", e)
 
 # ---------------------------
-# Load Tokenizer
+# Lazy loading (IMPORTANT for Render stability)
 # ---------------------------
-with open("model/tokenizer.pkl", "rb") as f:
-    tokenizer = pickle.load(f)
-
-# ---------------------------
-# Load Accuracy
-# ---------------------------
-with open("model/accuracy.txt", "r") as f:
-    accuracy = f.read().strip()
-
+model = None
+tokenizer = None
+accuracy = "N/A"
 max_len = 100
 
+
+def load_assets():
+    global model, tokenizer, accuracy
+
+    if model is None:
+        print("Loading model...")
+        model = load_model("model/sentiment_model.keras")
+
+    if tokenizer is None:
+        print("Loading tokenizer...")
+        with open("model/tokenizer.pkl", "rb") as f:
+            tokenizer = pickle.load(f)
+
+    if accuracy == "N/A":
+        try:
+            with open("model/accuracy.txt", "r") as f:
+                accuracy = f.read().strip()
+        except:
+            accuracy = "Unknown"
+
+    return model, tokenizer
+
+
 # ---------------------------
-# CLEAN TEXT (CRITICAL FIX)
+# Text cleaning
 # ---------------------------
 def clean_text(text):
     text = str(text).lower()
@@ -51,16 +66,15 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+
 # ---------------------------
-# Welcome Page
+# Routes
 # ---------------------------
 @app.route("/")
 def welcome():
     return render_template("welcome.html")
 
-# ---------------------------
-# Prediction Page
-# ---------------------------
+
 @app.route("/predict", methods=["GET", "POST"])
 def predict():
 
@@ -72,38 +86,37 @@ def predict():
 
     if request.method == "POST":
 
-        raw_review = request.form["review"]
+        raw_review = request.form.get("review", "")
 
-        # Empty Input Check
         if raw_review.strip() == "":
-            result = "Please enter a review."
             return render_template(
                 "index.html",
-                result=result,
-                review=raw_review,
-                stars=stars,
-                positive=positive,
-                negative=negative,
+                result="Please enter a review.",
+                review="",
+                stars="",
+                positive=0,
+                negative=0,
                 accuracy=accuracy
             )
 
         try:
-            # ✅ CLEAN TEXT
+            # Load model + tokenizer safely
+            model, tokenizer = load_assets()
+
+            # Clean input
             review = clean_text(raw_review)
 
-            # Convert text to sequence
+            # Convert to sequence
             seq = tokenizer.texts_to_sequences([review])
 
-            #  HANDLE UNKNOWN WORDS
             if len(seq[0]) == 0:
-                result = "Cannot determine"
                 return render_template(
                     "index.html",
-                    result=result,
+                    result="Cannot determine sentiment",
                     review=raw_review,
-                    stars=stars,
-                    positive=positive,
-                    negative=negative,
+                    stars="",
+                    positive=0,
+                    negative=0,
                     accuracy=accuracy
                 )
 
@@ -113,29 +126,27 @@ def predict():
             # Prediction
             pred = model.predict(padded, verbose=0)[0][0]
 
-            positive = float(round(pred * 100, 2))
-            negative = float(round((1 - pred) * 100, 2))
+            positive = round(float(pred * 100), 2)
+            negative = round(float((1 - pred) * 100), 2)
 
-            # Sentiment Decision
-            if pred >= 0.5:
-                result = "Positive 😊"
-            else:
-                result = "Negative 😞"
+            result = "Positive 😊" if pred >= 0.5 else "Negative 😞"
 
-            # ---------------------------
-            # Save to MongoDB
-            # ---------------------------
-            collection.insert_one({
-                "review": raw_review,
-                "prediction": result,
-                "positive_score": positive,
-                "negative_score": negative,
-                "time": str(datetime.now())
-            })
+            # Save to MongoDB (if available)
+            if collection is not None:
+                try:
+                    collection.insert_one({
+                        "review": raw_review,
+                        "prediction": result,
+                        "positive_score": positive,
+                        "negative_score": negative,
+                        "time": str(datetime.now())
+                    })
+                except Exception as e:
+                    print("Mongo insert failed:", e)
 
         except Exception as e:
+            print("Prediction error:", e)
             result = "Prediction Error"
-            print(e)
 
     return render_template(
         "index.html",
@@ -147,8 +158,9 @@ def predict():
         accuracy=accuracy
     )
 
+
 # ---------------------------
-# Run Flask App
+# Run locally only
 # ---------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=5000)
