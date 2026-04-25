@@ -1,54 +1,41 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Prediction</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <title>Sentiment Analysis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
 
+<body>
 <div class="overlay">
 <div class="box">
 
 <h1>Sentiment Analysis</h1>
 
-<h3>Model Accuracy: {{ accuracy }}%</h3>
-
-<form method="POST">
-
-<textarea name="review" placeholder="Enter Review Here..." required>{{ review }}</textarea>
-
+<form action="/predict" method="post">
+<textarea name="review" placeholder="Enter your review here">{{ review if review else "" }}</textarea>
 <br><br>
-
 <button type="submit">Predict</button>
-
 </form>
 
-<h2>{{ result }}</h2>
-<h2>{{ stars }}</h2>
-
 {% if result %}
+<h2>{{ result }}</h2>
+{% endif %}
 
+{% if positive is defined %}
 <h3>Sentiment Graph</h3>
 
 <p>Positive: {{ positive }}%</p>
 <div class="bar">
-<div class="positive" style="width:{{ positive }}%"></div>
+<div class="positive" style="width: {{ positive }}%;"></div>
 </div>
 
 <p>Negative: {{ negative }}%</p>
 <div class="bar">
-<div class="negative" style="width:{{ negative }}%"></div>
+<div class="negative" style="width: {{ negative }}%;"></div>
 </div>
-
 {% endif %}
 
-<br>
-<a href="/">
-<button>Back</button>
-</a>
-
 </div>
 </div>
-
 </body>
 </html>
