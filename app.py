@@ -3,13 +3,15 @@ from pymongo import MongoClient
 import os
 import re
 import pickle
-import traceback
 from datetime import datetime
+
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.sequence import pad_sequences as ps
 
 app = Flask(__name__)
 
 # ---------------------------
-# BASE PATHS
+# PATHS
 # ---------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "model", "sentiment_model.keras")
@@ -17,14 +19,15 @@ TOKENIZER_PATH = os.path.join(BASE_DIR, "model", "tokenizer.pkl")
 ACC_PATH = os.path.join(BASE_DIR, "model", "accuracy.txt")
 
 # ---------------------------
-# SAFE FILE CHECK
+# GLOBAL VARIABLES
 # ---------------------------
-def safe_exists(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Missing file: {path}")
+model = None
+tokenizer = None
+accuracy = "N/A"
+max_len = 100
 
 # ---------------------------
-# MONGODB (SAFE)
+# MONGO CONNECTION
 # ---------------------------
 MONGO_URI = os.getenv("MONGO_URI")
 collection = None
@@ -34,54 +37,39 @@ if MONGO_URI:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["sentiment_db"]
         collection = db["reviews"]
-        print("✅ MongoDB connected")
+        print("MongoDB connected")
     except Exception as e:
-        print("❌ MongoDB error:", e)
+        print(" MongoDB error:", e)
 
 # ---------------------------
-# GLOBALS
+# MODEL LOADING (YOUR FINAL VERSION)
 # ---------------------------
-model = None
-tokenizer = None
-pad_sequences = None
-accuracy = "N/A"
-max_len = 100
+def get_model():
+    global model, tokenizer, accuracy
 
-# ---------------------------
-# LOAD MODEL + TOKENIZER (LAZY LOAD)
-# ---------------------------
-def load_assets():
-    global model, tokenizer, pad_sequences, accuracy
-
-    from tensorflow.keras.models import load_model
-    from tensorflow.keras.preprocessing.sequence import pad_sequences as ps
-
-    pad_sequences = ps
-
-    # Load model safely
     if model is None:
-        safe_exists(MODEL_PATH)
+        print(" Loading model on first request only...")
+
+        from tensorflow.keras.models import load_model
+        from tensorflow.keras.preprocessing.sequence import pad_sequences as ps
+
         model = load_model(MODEL_PATH, compile=False)
 
-    # Load tokenizer
-    if tokenizer is None:
-        safe_exists(TOKENIZER_PATH)
         with open(TOKENIZER_PATH, "rb") as f:
             tokenizer = pickle.load(f)
 
-    # Load accuracy
-    if accuracy == "N/A":
         try:
-            safe_exists(ACC_PATH)
             with open(ACC_PATH, "r") as f:
                 accuracy = f.read().strip()
         except:
             accuracy = "Unknown"
 
-    return model, tokenizer, pad_sequences
+        print(" Model loaded")
+
+    return model, tokenizer, ps
 
 # ---------------------------
-# TEXT CLEANING (MATCH TRAINING)
+# TEXT CLEANING
 # ---------------------------
 def clean_text(text):
     text = str(text).lower()
@@ -101,19 +89,19 @@ def home():
 @app.route("/predict", methods=["GET", "POST"])
 def predict():
 
-    raw_review = ""
     result = ""
+    review_text = ""
     positive = 0.0
     negative = 0.0
 
     if request.method == "POST":
 
-        raw_review = request.form.get("review", "").strip()
+        review_text = request.form.get("review", "").strip()
 
-        if raw_review == "":
+        if not review_text:
             return render_template(
                 "index.html",
-                result="Please enter a review.",
+                result="Please enter text",
                 review="",
                 positive=0,
                 negative=0,
@@ -121,21 +109,20 @@ def predict():
             )
 
         try:
-            # LOAD MODEL
-            model, tokenizer, pad_sequences = load_assets()
+            # LOAD MODEL (LAZY)
+            model, tokenizer, pad_sequences = get_model()
 
             # CLEAN TEXT
-            review = clean_text(raw_review)
+            review = clean_text(review_text)
 
             # TOKENIZE
             seq = tokenizer.texts_to_sequences([review])
 
-            # HANDLE UNKNOWN TEXT
             if not seq or len(seq[0]) == 0:
                 return render_template(
                     "index.html",
-                    result="Cannot determine sentiment",
-                    review=raw_review,
+                    result="Cannot predict sentiment",
+                    review=review_text,
                     positive=0,
                     negative=0,
                     accuracy=accuracy
@@ -147,8 +134,8 @@ def predict():
             # PREDICT
             pred = model.predict(padded, verbose=0)[0][0]
 
-            positive = round(float(pred * 100), 2)
-            negative = round(float((1 - pred) * 100), 2)
+            positive = round(pred * 100, 2)
+            negative = round((1 - pred) * 100, 2)
 
             result = "Positive 😊" if pred >= 0.5 else "Negative 😞"
 
@@ -156,31 +143,30 @@ def predict():
             if collection:
                 try:
                     collection.insert_one({
-                        "review": raw_review,
+                        "review": review_text,
                         "prediction": result,
-                        "positive_score": positive,
-                        "negative_score": negative,
+                        "positive": positive,
+                        "negative": negative,
                         "time": datetime.utcnow().isoformat()
                     })
                 except Exception as e:
-                    print("Mongo insert failed:", e)
+                    print("Mongo error:", e)
 
         except Exception as e:
-            print("🔥 FULL ERROR TRACE 👇")
-            print(traceback.format_exc())
+            print("🔥 ERROR:", e)
             result = "Server Error"
 
     return render_template(
         "index.html",
         result=result,
-        review=raw_review,   # <-- FIX: keeps text after submit
+        review=review_text,
         positive=positive,
         negative=negative,
         accuracy=accuracy
     )
 
 # ---------------------------
-# RUN (RENDER SAFE)
+# RUN
 # ---------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
