@@ -3,6 +3,7 @@ from pymongo import MongoClient
 import os
 import re
 import pickle
+import traceback
 from datetime import datetime
 
 app = Flask(__name__)
@@ -23,7 +24,7 @@ def safe_exists(path):
         raise FileNotFoundError(f"Missing file: {path}")
 
 # ---------------------------
-# MONGODB (OPTIONAL)
+# MONGODB (SAFE)
 # ---------------------------
 MONGO_URI = os.getenv("MONGO_URI")
 collection = None
@@ -33,12 +34,12 @@ if MONGO_URI:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["sentiment_db"]
         collection = db["reviews"]
-        print("MongoDB connected")
+        print("✅ MongoDB connected")
     except Exception as e:
-        print("MongoDB error:", e)
+        print("❌ MongoDB error:", e)
 
 # ---------------------------
-# ML ASSETS (LAZY LOAD)
+# GLOBALS
 # ---------------------------
 model = None
 tokenizer = None
@@ -46,20 +47,21 @@ pad_sequences = None
 accuracy = "N/A"
 max_len = 100
 
-
+# ---------------------------
+# LOAD MODEL + TOKENIZER (LAZY LOAD)
+# ---------------------------
 def load_assets():
     global model, tokenizer, pad_sequences, accuracy
 
-    # TensorFlow import only when needed (IMPORTANT for Render)
     from tensorflow.keras.models import load_model
     from tensorflow.keras.preprocessing.sequence import pad_sequences as ps
 
     pad_sequences = ps
 
-    # Load model
+    # Load model safely
     if model is None:
         safe_exists(MODEL_PATH)
-        model = load_model(MODEL_PATH)
+        model = load_model(MODEL_PATH, compile=False)
 
     # Load tokenizer
     if tokenizer is None:
@@ -79,7 +81,7 @@ def load_assets():
     return model, tokenizer, pad_sequences
 
 # ---------------------------
-# TEXT CLEANING
+# TEXT CLEANING (MATCH TRAINING)
 # ---------------------------
 def clean_text(text):
     text = str(text).lower()
@@ -98,15 +100,17 @@ def home():
 
 @app.route("/predict", methods=["GET", "POST"])
 def predict():
+
     raw_review = ""
     result = ""
     positive = 0.0
     negative = 0.0
 
     if request.method == "POST":
+
         raw_review = request.form.get("review", "").strip()
 
-        if not raw_review:
+        if raw_review == "":
             return render_template(
                 "index.html",
                 result="Please enter a review.",
@@ -117,11 +121,16 @@ def predict():
             )
 
         try:
+            # LOAD MODEL
             model, tokenizer, pad_sequences = load_assets()
 
+            # CLEAN TEXT
             review = clean_text(raw_review)
+
+            # TOKENIZE
             seq = tokenizer.texts_to_sequences([review])
 
+            # HANDLE UNKNOWN TEXT
             if not seq or len(seq[0]) == 0:
                 return render_template(
                     "index.html",
@@ -132,7 +141,10 @@ def predict():
                     accuracy=accuracy
                 )
 
+            # PAD
             padded = pad_sequences(seq, maxlen=max_len)
+
+            # PREDICT
             pred = model.predict(padded, verbose=0)[0][0]
 
             positive = round(float(pred * 100), 2)
@@ -140,7 +152,7 @@ def predict():
 
             result = "Positive 😊" if pred >= 0.5 else "Negative 😞"
 
-            # MongoDB safe insert
+            # SAVE TO MONGO
             if collection:
                 try:
                     collection.insert_one({
@@ -154,13 +166,14 @@ def predict():
                     print("Mongo insert failed:", e)
 
         except Exception as e:
-            print("Prediction error:", e)
+            print("🔥 FULL ERROR TRACE 👇")
+            print(traceback.format_exc())
             result = "Server Error"
 
     return render_template(
         "index.html",
         result=result,
-        review=raw_review,
+        review=raw_review,   # <-- FIX: keeps text after submit
         positive=positive,
         negative=negative,
         accuracy=accuracy
