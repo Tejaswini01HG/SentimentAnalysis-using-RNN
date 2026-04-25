@@ -27,7 +27,7 @@ collection = db["reviews"]
 # ---------------------------
 # Load Trained RNN Model
 # ---------------------------
-model = load_model("model/sentiment_model.h5")
+model = load_model("model/sentiment_model.h5", compile=False)
 # ---------------------------
 # Load Tokenizer
 # ---------------------------
