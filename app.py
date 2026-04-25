@@ -94,7 +94,7 @@ def predict():
             # Convert text to sequence
             seq = tokenizer.texts_to_sequences([review])
 
-            # ✅ HANDLE UNKNOWN WORDS
+            #  HANDLE UNKNOWN WORDS
             if len(seq[0]) == 0:
                 result = "Cannot determine"
                 return render_template(
