@@ -8,7 +8,7 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ---------------------------
-# Paths (IMPORTANT FIX)
+# BASE PATHS
 # ---------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "model", "sentiment_model.keras")
@@ -16,46 +16,61 @@ TOKENIZER_PATH = os.path.join(BASE_DIR, "model", "tokenizer.pkl")
 ACC_PATH = os.path.join(BASE_DIR, "model", "accuracy.txt")
 
 # ---------------------------
-# MongoDB Setup
+# SAFE FILE CHECK
+# ---------------------------
+def safe_exists(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Missing file: {path}")
+
+# ---------------------------
+# MONGODB (OPTIONAL)
 # ---------------------------
 MONGO_URI = os.getenv("MONGO_URI")
 collection = None
 
 if MONGO_URI:
     try:
-        client = MongoClient(MONGO_URI)
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["sentiment_db"]
         collection = db["reviews"]
+        print("MongoDB connected")
     except Exception as e:
         print("MongoDB error:", e)
 
 # ---------------------------
-# Lazy-loaded assets
+# ML ASSETS (LAZY LOAD)
 # ---------------------------
 model = None
 tokenizer = None
+pad_sequences = None
 accuracy = "N/A"
 max_len = 100
 
 
 def load_assets():
-    global model, tokenizer, accuracy
+    global model, tokenizer, pad_sequences, accuracy
 
-    # TensorFlow imported ONLY when needed (important for Render stability)
+    # TensorFlow import only when needed (IMPORTANT for Render)
     from tensorflow.keras.models import load_model
-    from tensorflow.keras.preprocessing.sequence import pad_sequences
+    from tensorflow.keras.preprocessing.sequence import pad_sequences as ps
 
+    pad_sequences = ps
+
+    # Load model
     if model is None:
-        print("Loading model...")
+        safe_exists(MODEL_PATH)
         model = load_model(MODEL_PATH)
 
+    # Load tokenizer
     if tokenizer is None:
-        print("Loading tokenizer...")
+        safe_exists(TOKENIZER_PATH)
         with open(TOKENIZER_PATH, "rb") as f:
             tokenizer = pickle.load(f)
 
+    # Load accuracy
     if accuracy == "N/A":
         try:
+            safe_exists(ACC_PATH)
             with open(ACC_PATH, "r") as f:
                 accuracy = f.read().strip()
         except:
@@ -63,9 +78,8 @@ def load_assets():
 
     return model, tokenizer, pad_sequences
 
-
 # ---------------------------
-# Text cleaning
+# TEXT CLEANING
 # ---------------------------
 def clean_text(text):
     text = str(text).lower()
@@ -74,30 +88,33 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
-
 # ---------------------------
-# Routes
+# ROUTES
 # ---------------------------
 @app.route("/")
-def welcome():
+def home():
     return render_template("welcome.html")
 
 
 @app.route("/predict", methods=["GET", "POST"])
 def predict():
-
     raw_review = ""
     result = ""
-    stars = ""
-    positive = 0
-    negative = 0
+    positive = 0.0
+    negative = 0.0
 
     if request.method == "POST":
+        raw_review = request.form.get("review", "").strip()
 
-        raw_review = request.form.get("review", "")
-
-        if raw_review.strip() == "":
-            return render_template("index.html", result="Please enter a review.")
+        if not raw_review:
+            return render_template(
+                "index.html",
+                result="Please enter a review.",
+                review="",
+                positive=0,
+                negative=0,
+                accuracy=accuracy
+            )
 
         try:
             model, tokenizer, pad_sequences = load_assets()
@@ -105,7 +122,7 @@ def predict():
             review = clean_text(raw_review)
             seq = tokenizer.texts_to_sequences([review])
 
-            if len(seq[0]) == 0:
+            if not seq or len(seq[0]) == 0:
                 return render_template(
                     "index.html",
                     result="Cannot determine sentiment",
@@ -123,18 +140,22 @@ def predict():
 
             result = "Positive 😊" if pred >= 0.5 else "Negative 😞"
 
+            # MongoDB safe insert
             if collection:
-                collection.insert_one({
-                    "review": raw_review,
-                    "prediction": result,
-                    "positive_score": positive,
-                    "negative_score": negative,
-                    "time": str(datetime.now())
-                })
+                try:
+                    collection.insert_one({
+                        "review": raw_review,
+                        "prediction": result,
+                        "positive_score": positive,
+                        "negative_score": negative,
+                        "time": datetime.utcnow().isoformat()
+                    })
+                except Exception as e:
+                    print("Mongo insert failed:", e)
 
         except Exception as e:
-            print("Error:", e)
-            result = "Prediction Error"
+            print("Prediction error:", e)
+            result = "Server Error"
 
     return render_template(
         "index.html",
@@ -145,9 +166,9 @@ def predict():
         accuracy=accuracy
     )
 
-
 # ---------------------------
-# Run locally
+# RUN (RENDER SAFE)
 # ---------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
