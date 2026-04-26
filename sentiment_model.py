@@ -7,7 +7,7 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 class SentimentModel:
 
     def __init__(self, model_path, tokenizer_path, max_len=100):
-        self.model = load_model(model_path)
+        self.model = load_model(model_path, compile=False)
         self.tokenizer = pickle.load(open(tokenizer_path, "rb"))
         self.max_len = max_len
 
